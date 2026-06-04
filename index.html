@@ -51,7 +51,7 @@
                 <button id="btnAnalyze" class="btn">Analizează Documentele cu GPT-4o Real</button>
 
                 <div id="loadingOverlay" class="loading">
-                    🔄 AI analizează documentele tale prin serverul local... Vă rugăm așteptați.
+                    🔄 AI analizează documentele prin serverul securizat... Vă rugăm așteptați.
                 </div>
 
                 <div id="resultsContainer" class="results-box">
@@ -160,7 +160,7 @@
                     alert('Eroare la nivelul motorului AI: ' + data.error);
                 }
             } catch (err) {
-                alert('Eroare de conexiune: Asigură-te că serverul "python app.py" rulează în Command Prompt.');
+                alert('Eroare de conexiune: backend-ul online nu răspunde. Încearcă din nou în câteva secunde.');
             } finally {
                 loadingOverlay.style.display = 'none';
             }
