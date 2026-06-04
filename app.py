@@ -6,6 +6,7 @@ import zipfile
 from io import BytesIO
 
 import fitz  # PyMuPDF
+from PIL import Image
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
@@ -16,34 +17,59 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
+# Limită de upload ca să nu cadă serverul pe fișiere foarte mari
+app.config["MAX_CONTENT_LENGTH"] = 80 * 1024 * 1024  # 80 MB
+
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "pdf", "zip"}
+
+# Setări pentru reducerea consumului de RAM
+MAX_FILES_PER_REQUEST = 35
+MAX_TEXT_CHARS_PER_PDF = 1800
+MAX_PDF_TEXT_PAGES = 4
+MAX_IMAGE_DIMENSION = 1200
+IMAGE_JPEG_QUALITY = 65
+MAX_SCANNED_PDF_PAGES_AS_IMAGE = 1
 
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def image_to_base64(file_bytes):
-    return base64.b64encode(file_bytes).decode("utf-8")
-
-
-def pdf_to_base64_images(pdf_bytes, max_pages=1):
-    images = []
+def compress_image_to_data_url(file_bytes, max_dimension=MAX_IMAGE_DIMENSION, quality=IMAGE_JPEG_QUALITY):
+    """
+    Primește bytes de imagine și returnează data URL JPEG comprimat.
+    Reduce mult memoria și dimensiunea payloadului trimis către OpenAI.
+    """
     try:
-        pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
-        for page_index in range(min(len(pdf), max_pages)):
-            page = pdf[page_index]
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-            png_bytes = pix.tobytes("png")
-            images.append(base64.b64encode(png_bytes).decode("utf-8"))
+        img = Image.open(BytesIO(file_bytes))
+
+        # Convertim totul în RGB pentru JPEG
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        # Redimensionare proporțională
+        img.thumbnail((max_dimension, max_dimension))
+
+        output = BytesIO()
+        img.save(output, format="JPEG", quality=quality, optimize=True)
+
+        b64 = base64.b64encode(output.getvalue()).decode("utf-8")
+        return f"data:image/jpeg;base64,{b64}"
+
     except Exception as e:
-        print(f"Eroare conversie PDF: {e}")
-    return images
+        print(f"Eroare comprimare imagine: {e}")
+        return None
 
 
-def pdf_to_text(pdf_bytes, max_pages=3, max_chars=2500):
+def pdf_to_text(pdf_bytes, max_pages=MAX_PDF_TEXT_PAGES, max_chars=MAX_TEXT_CHARS_PER_PDF):
+    """
+    Extrage text din PDF, dar îl limitează ca să nu depășim limita de tokeni.
+    Pentru polițe CASCO și taloane, textul extras e mai sigur decât analiza imaginii.
+    """
     text_parts = []
 
     try:
@@ -64,6 +90,82 @@ def pdf_to_text(pdf_bytes, max_pages=3, max_chars=2500):
     except Exception as e:
         print(f"Eroare extragere text PDF: {e}")
         return ""
+
+
+def pdf_to_compressed_images(pdf_bytes, max_pages=MAX_SCANNED_PDF_PAGES_AS_IMAGE):
+    """
+    Folosit doar pentru PDF-uri scanate, fără text extractabil.
+    Randăm maximum 1 pagină și o comprimăm ca JPEG.
+    """
+    images = []
+
+    try:
+        pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+        for page_index in range(min(len(pdf), max_pages)):
+            page = pdf[page_index]
+
+            # Zoom mai mic decât înainte pentru consum redus de memorie
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2))
+            png_bytes = pix.tobytes("png")
+
+            data_url = compress_image_to_data_url(
+                png_bytes,
+                max_dimension=MAX_IMAGE_DIMENSION,
+                quality=IMAGE_JPEG_QUALITY
+            )
+
+            if data_url:
+                images.append(data_url)
+
+    except Exception as e:
+        print(f"Eroare conversie PDF scanat în imagine: {e}")
+
+    return images
+
+
+def add_image_content(content, data_url):
+    if data_url:
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": data_url
+            }
+        })
+
+
+def add_pdf_content(content, filename, pdf_bytes):
+    """
+    Pentru PDF:
+    1. încearcă să extragă text;
+    2. dacă există text, trimite doar textul;
+    3. dacă nu există text, trimite doar prima pagină ca imagine comprimată.
+    """
+    pdf_text = pdf_to_text(pdf_bytes)
+
+    if pdf_text:
+        content.append({
+            "type": "text",
+            "text": f"Text extras din PDF {filename}:\n{pdf_text}"
+        })
+    else:
+        content.append({
+            "type": "text",
+            "text": f"PDF scanat fără text extractabil: {filename}. Analizează imaginea primei pagini."
+        })
+
+        pdf_images = pdf_to_compressed_images(pdf_bytes)
+
+        for data_url in pdf_images:
+            add_image_content(content, data_url)
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "status": "online",
+        "message": "IDP Daune Auto backend este activ."
+    })
 
 
 @app.route("/api/analyze", methods=["POST"])
@@ -102,7 +204,11 @@ REGULI DE VALIDARE:
 - Dacă data curentă este după data de expirare, documentul este invalid/expirat.
 - Dacă nu există dată de expirare clară, pune expiration_date: null și explică în observations.
 
-Returnează strict JSON valid, fără formatare markdown.
+IMPORTANT:
+- Analizează doar fișierele primite.
+- Dacă un document nu se potrivește exact listei obligatorii, identifică-l cât mai clar în document_type, dar nu îl pune în missing_documents ca document obligatoriu îndeplinit.
+- Pentru missing_documents folosește doar cheile obligatorii din listă.
+- Returnează strict JSON valid, fără formatare markdown.
 
 Structura JSON obligatorie:
 {{
@@ -127,11 +233,18 @@ Structura JSON obligatorie:
     ]
 
     processed_files_names = []
+    total_processed = 0
+    skipped_files = []
 
     for file in files:
         filename = file.filename
 
         if not allowed_file(filename):
+            skipped_files.append(filename)
+            continue
+
+        if total_processed >= MAX_FILES_PER_REQUEST:
+            skipped_files.append(filename)
             continue
 
         file_bytes = file.read()
@@ -142,6 +255,10 @@ Structura JSON obligatorie:
             try:
                 with zipfile.ZipFile(BytesIO(file_bytes)) as z:
                     for zip_info in z.infolist():
+                        if total_processed >= MAX_FILES_PER_REQUEST:
+                            skipped_files.append(zip_info.filename)
+                            continue
+
                         # Ignorăm folderele goale și fișierele de sistem ascunse
                         if (
                             zip_info.is_dir()
@@ -157,10 +274,13 @@ Structura JSON obligatorie:
 
                         z_ext = z_filename.rsplit(".", 1)[1].lower() if "." in z_filename else ""
                         if z_ext not in ["png", "jpg", "jpeg", "pdf"]:
+                            skipped_files.append(z_filename)
                             continue
 
                         z_bytes = z.read(zip_info.filename)
+
                         processed_files_names.append(z_filename)
+                        total_processed += 1
 
                         content.append({
                             "type": "text",
@@ -168,33 +288,11 @@ Structura JSON obligatorie:
                         })
 
                         if z_ext in ["png", "jpg", "jpeg"]:
-                            mime = "image/png" if z_ext == "png" else "image/jpeg"
-                            b64 = base64.b64encode(z_bytes).decode("utf-8")
-
-                            content.append({
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime};base64,{b64}"
-                                }
-                            })
+                            data_url = compress_image_to_data_url(z_bytes)
+                            add_image_content(content, data_url)
 
                         elif z_ext == "pdf":
-                            pdf_text = pdf_to_text(z_bytes, max_pages=3, max_chars=2500)
-
-                            if pdf_text:
-                                content.append({
-                                    "type": "text",
-                                    "text": f"Text extras din PDF {z_filename}:\n{pdf_text}"
-                                })
-                            else:
-                                pdf_imgs = pdf_to_base64_images(z_bytes, max_pages=1)
-                                for idx, img_b64 in enumerate(pdf_imgs):
-                                    content.append({
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/png;base64,{img_b64}"
-                                        }
-                                    })
+                            add_pdf_content(content, z_filename, z_bytes)
 
             except Exception as e:
                 return jsonify({
@@ -202,49 +300,30 @@ Structura JSON obligatorie:
                     "error": f"Arhiva ZIP nevalidă: {str(e)}"
                 }), 400
 
-        # Procesare imagini directe externe
+        # Procesare imagini directe
         elif extension in ["png", "jpg", "jpeg"]:
             processed_files_names.append(filename)
-            mime = "image/png" if extension == "png" else "image/jpeg"
-            b64 = image_to_base64(file_bytes)
+            total_processed += 1
 
             content.append({
                 "type": "text",
                 "text": f"Fișier: {filename}"
             })
 
-            content.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{mime};base64,{b64}"
-                }
-            })
+            data_url = compress_image_to_data_url(file_bytes)
+            add_image_content(content, data_url)
 
-        # Procesare PDF direct extern
+        # Procesare PDF direct
         elif extension == "pdf":
             processed_files_names.append(filename)
+            total_processed += 1
 
             content.append({
                 "type": "text",
                 "text": f"Fișier: {filename}"
             })
 
-            pdf_text = pdf_to_text(file_bytes, max_pages=3, max_chars=2500)
-
-            if pdf_text:
-                content.append({
-                    "type": "text",
-                    "text": f"Text extras din PDF {filename}:\n{pdf_text}"
-                })
-            else:
-                pdf_imgs = pdf_to_base64_images(file_bytes, max_pages=1)
-                for idx, img_b64 in enumerate(pdf_imgs):
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{img_b64}"
-                        }
-                    })
+            add_pdf_content(content, filename, file_bytes)
 
     if not processed_files_names:
         return jsonify({
@@ -273,6 +352,7 @@ Structura JSON obligatorie:
         return jsonify({
             "success": True,
             "files_received": processed_files_names,
+            "files_skipped": skipped_files,
             "analysis": result_json
         })
 
