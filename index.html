@@ -120,7 +120,7 @@
             Array.from(fileInput.files).forEach(file => { formData.append('files', file); });
 
             try {
-                const response = await fetch('http://127.0.0.1:5000/api/analyze', { method: 'POST', body: formData });
+                const response = await fetch('https://idp-daune-auto-backend.onrender.com/api/analyze', { method: 'POST', body: formData });
                 const data = await response.json();
                 
                 if (data.success) {
