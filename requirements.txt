@@ -4,3 +4,4 @@ openai
 python-dotenv
 PyMuPDF
 gunicorn
+Pillow
