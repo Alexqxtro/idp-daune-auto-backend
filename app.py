@@ -17,20 +17,20 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-# Limită de upload ca să nu cadă serverul pe fișiere foarte mari
+# Limita de upload pentru a evita blocarea serverului pe fisiere foarte mari
 app.config["MAX_CONTENT_LENGTH"] = 80 * 1024 * 1024  # 80 MB
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "pdf", "zip"}
 
-# Setări pentru reducerea consumului de RAM
+# Setari pentru reducerea consumului de RAM
 MAX_FILES_PER_REQUEST = 35
-MAX_TEXT_CHARS_PER_PDF = 1800
+MAX_TEXT_CHARS_PER_PDF = 2200
 MAX_PDF_TEXT_PAGES = 4
 MAX_IMAGE_DIMENSION = 1200
 IMAGE_JPEG_QUALITY = 65
-MAX_SCANNED_PDF_PAGES_AS_IMAGE = 1
+MAX_SCANNED_PDF_PAGES_AS_IMAGE = 2
 
 
 def allowed_file(filename):
@@ -39,19 +39,17 @@ def allowed_file(filename):
 
 def compress_image_to_data_url(file_bytes, max_dimension=MAX_IMAGE_DIMENSION, quality=IMAGE_JPEG_QUALITY):
     """
-    Primește bytes de imagine și returnează data URL JPEG comprimat.
-    Reduce mult memoria și dimensiunea payloadului trimis către OpenAI.
+    Primeste bytes de imagine si returneaza data URL JPEG comprimat.
+    Reduce memoria si dimensiunea payloadului trimis catre OpenAI.
     """
     try:
         img = Image.open(BytesIO(file_bytes))
 
-        # Convertim totul în RGB pentru JPEG
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
         elif img.mode != "RGB":
             img = img.convert("RGB")
 
-        # Redimensionare proporțională
         img.thumbnail((max_dimension, max_dimension))
 
         output = BytesIO()
@@ -67,8 +65,8 @@ def compress_image_to_data_url(file_bytes, max_dimension=MAX_IMAGE_DIMENSION, qu
 
 def pdf_to_text(pdf_bytes, max_pages=MAX_PDF_TEXT_PAGES, max_chars=MAX_TEXT_CHARS_PER_PDF):
     """
-    Extrage text din PDF, dar îl limitează ca să nu depășim limita de tokeni.
-    Pentru polițe CASCO și taloane, textul extras e mai sigur decât analiza imaginii.
+    Extrage text din PDF si il limiteaza ca sa nu depasim limita de tokeni.
+    Pentru polite CASCO, taloane si documente text, textul extras e mai sigur decat imaginea.
     """
     text_parts = []
 
@@ -94,8 +92,8 @@ def pdf_to_text(pdf_bytes, max_pages=MAX_PDF_TEXT_PAGES, max_chars=MAX_TEXT_CHAR
 
 def pdf_to_compressed_images(pdf_bytes, max_pages=MAX_SCANNED_PDF_PAGES_AS_IMAGE):
     """
-    Folosit doar pentru PDF-uri scanate, fără text extractabil.
-    Randăm maximum 1 pagină și o comprimăm ca JPEG.
+    Folosit pentru PDF-uri scanate sau fara text extractabil.
+    Randam primele pagini si le comprimam ca JPEG.
     """
     images = []
 
@@ -105,7 +103,7 @@ def pdf_to_compressed_images(pdf_bytes, max_pages=MAX_SCANNED_PDF_PAGES_AS_IMAGE
         for page_index in range(min(len(pdf), max_pages)):
             page = pdf[page_index]
 
-            # Zoom mai mic decât înainte pentru consum redus de memorie
+            # Zoom redus pentru consum mai mic de memorie
             pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2))
             png_bytes = pix.tobytes("png")
 
@@ -119,7 +117,7 @@ def pdf_to_compressed_images(pdf_bytes, max_pages=MAX_SCANNED_PDF_PAGES_AS_IMAGE
                 images.append(data_url)
 
     except Exception as e:
-        print(f"Eroare conversie PDF scanat în imagine: {e}")
+        print(f"Eroare conversie PDF scanat in imagine: {e}")
 
     return images
 
@@ -137,9 +135,9 @@ def add_image_content(content, data_url):
 def add_pdf_content(content, filename, pdf_bytes):
     """
     Pentru PDF:
-    1. încearcă să extragă text;
-    2. dacă există text, trimite doar textul;
-    3. dacă nu există text, trimite doar prima pagină ca imagine comprimată.
+    1. incearca sa extraga text;
+    2. daca exista text, trimite textul;
+    3. daca nu exista text, trimite primele pagini ca imagini comprimate.
     """
     pdf_text = pdf_to_text(pdf_bytes)
 
@@ -151,7 +149,7 @@ def add_pdf_content(content, filename, pdf_bytes):
     else:
         content.append({
             "type": "text",
-            "text": f"PDF scanat fără text extractabil: {filename}. Analizează imaginea primei pagini."
+            "text": f"PDF scanat fara text extractabil: {filename}. Analizeaza imaginile primelor pagini."
         })
 
         pdf_images = pdf_to_compressed_images(pdf_bytes)
@@ -171,54 +169,59 @@ def home():
 @app.route("/api/analyze", methods=["POST"])
 def analyze_documents():
     if "files" not in request.files:
-        return jsonify({"error": "Nu ai trimis niciun fișier."}), 400
+        return jsonify({"error": "Nu ai trimis niciun fisier."}), 400
 
     files = request.files.getlist("files")
     if not files or files[0].filename == "":
-        return jsonify({"error": "Lista de fișiere este goală."}), 400
+        return jsonify({"error": "Lista de fisiere este goala."}), 400
 
     content = [
         {
             "type": "text",
             "text": f"""
-Analizează documentele extrase din dosarul de daună auto încărcat.
-Data curentă este: {datetime.date.today().isoformat()}.
+Analizeaza documentele extrase din dosarul de dauna auto incarcat.
+Data curenta este: {datetime.date.today().isoformat()}.
 
-Trebuie să identifici pentru FIECARE document găsit în listă:
+Trebuie sa identifici pentru FIECARE document gasit in lista:
 - tipul documentului: buletin, permis_conducere, talon_auto, polita_casco, contract_cesiune, contract_mandat, imputernicire_proprietar, fotografie_parbriz_avariat, foto_cod_parbriz_avariat, foto_serie_vin, foto_parbriz_inlocuit_cu_cod_nou;
-- dacă documentul este lizibil;
-- dacă există o dată de expirare;
-- dacă documentul este valid sau expirat raportat la data curentă;
-- observații clare pentru utilizator în limba română.
+- daca documentul este lizibil;
+- daca exista o data de expirare;
+- daca documentul este valid sau expirat raportat la data curenta;
+- observatii clare pentru utilizator in limba romana.
 
-REGULI IMPORTANTE PENTRU POLIȚA CASCO:
-- Pentru polița CASCO, data de expirare trebuie extrasă din câmpuri precum „Perioada asigurată”, „Valabilitate”, „de la ... la ...”.
-- Dacă apare o perioadă de forma „de la 30.09.2025 la 29.09.2028”, atunci data de expirare este 29.09.2028.
-- Nu confunda data emiterii poliței, data contractului, data plății sau data începutului valabilității cu data expirării.
-- Nu marca polița CASCO drept expirată dacă data curentă este înainte de data finală a perioadei asigurate.
-- Dacă textul extras din PDF conține perioada de valabilitate, acordă prioritate textului extras față de interpretarea vizuală a imaginii.
+REGULI IMPORTANTE PENTRU POLITA CASCO:
+- Pentru polita CASCO, data de expirare trebuie extrasa din campuri precum „Perioada asigurata”, „Valabilitate”, „de la ... la ...”.
+- Daca apare o perioada de forma „de la 30.09.2025 la 29.09.2028”, atunci data de expirare este 29.09.2028.
+- Nu confunda data emiterii politei, data contractului, data platii sau data inceputului valabilitatii cu data expirarii.
+- Nu marca polita CASCO drept expirata daca data curenta este inainte de data finala a perioadei asigurate.
+- Daca textul extras din PDF contine perioada de valabilitate, acorda prioritate textului extras fata de interpretarea vizuala a imaginii.
 
 REGULI DE VALIDARE:
-- Dacă documentul are o perioadă de valabilitate cu dată de început și dată de sfârșit, data de expirare este data de sfârșit.
-- Dacă data curentă este înainte sau egală cu data de expirare, documentul este valid.
-- Dacă data curentă este după data de expirare, documentul este invalid/expirat.
-- Dacă nu există dată de expirare clară, pune expiration_date: null și explică în observations.
+- Daca documentul are o perioada de valabilitate cu data de inceput si data de sfarsit, data de expirare este data de sfarsit.
+- Daca data curenta este inainte sau egala cu data de expirare, documentul este valid.
+- Daca data curenta este dupa data de expirare, documentul este invalid/expirat.
+- Daca nu exista data de expirare clara, pune expiration_date: null si explica in observations.
+
+REGULI PENTRU DOCUMENTE SCANATE:
+- Daca documentul este scanat si textul nu este extractabil, foloseste imaginile primelor pagini pentru identificare.
+- Daca documentul nu poate fi identificat cu certitudine, foloseste document_type: "unknown" si validity_status: "unknown".
+- Pentru documentele scanate clare, poti marca documentul valid daca este lizibil si corespunde tipului identificat.
 
 IMPORTANT:
-- Analizează doar fișierele primite.
-- Dacă un document nu se potrivește exact listei obligatorii, identifică-l cât mai clar în document_type, dar nu îl pune în missing_documents ca document obligatoriu îndeplinit.
-- Pentru missing_documents folosește doar cheile obligatorii din listă.
-- Returnează strict JSON valid, fără formatare markdown.
+- Analizeaza doar fisierele primite.
+- Pentru missing_documents foloseste doar cheile obligatorii din lista.
+- Daca un document nu se potriveste exact listei obligatorii, identifica-l cat mai clar in document_type, dar nu il considera document obligatoriu indeplinit.
+- Returneaza strict JSON valid, fara formatare markdown.
 
 Structura JSON obligatorie:
 {{
   "overall_status": "valid" sau "invalid",
-  "summary": "rezumat scurt în română",
+  "summary": "rezumat scurt in romana",
   "documents": [
     {{
       "file_name": "nume fisier original",
-      "document_type": "tip_detectat_exact_din_lista_de_sus",
-      "validity_status": "valid" sau "invalid",
+      "document_type": "tip_detectat_exact_din_lista_de_sus_sau_unknown",
+      "validity_status": "valid" sau "invalid" sau "unknown",
       "expiration_date": "YYYY-MM-DD sau null",
       "is_readable": true sau false,
       "observations": "observatii clare in romana"
@@ -250,7 +253,7 @@ Structura JSON obligatorie:
         file_bytes = file.read()
         extension = filename.rsplit(".", 1)[1].lower()
 
-        # Procesare arhivă ZIP
+        # Procesare arhiva ZIP
         if extension == "zip":
             try:
                 with zipfile.ZipFile(BytesIO(file_bytes)) as z:
@@ -259,7 +262,7 @@ Structura JSON obligatorie:
                             skipped_files.append(zip_info.filename)
                             continue
 
-                        # Ignorăm folderele goale și fișierele de sistem ascunse
+                        # Ignoram folderele goale si fisierele de sistem ascunse
                         if (
                             zip_info.is_dir()
                             or zip_info.filename.startswith("__")
@@ -284,7 +287,7 @@ Structura JSON obligatorie:
 
                         content.append({
                             "type": "text",
-                            "text": f"Fișier extras din ZIP: {z_filename}"
+                            "text": f"Fisier extras din ZIP: {z_filename}"
                         })
 
                         if z_ext in ["png", "jpg", "jpeg"]:
@@ -297,7 +300,7 @@ Structura JSON obligatorie:
             except Exception as e:
                 return jsonify({
                     "success": False,
-                    "error": f"Arhiva ZIP nevalidă: {str(e)}"
+                    "error": f"Arhiva ZIP nevalida: {str(e)}"
                 }), 400
 
         # Procesare imagini directe
@@ -307,7 +310,7 @@ Structura JSON obligatorie:
 
             content.append({
                 "type": "text",
-                "text": f"Fișier: {filename}"
+                "text": f"Fisier: {filename}"
             })
 
             data_url = compress_image_to_data_url(file_bytes)
@@ -320,14 +323,14 @@ Structura JSON obligatorie:
 
             content.append({
                 "type": "text",
-                "text": f"Fișier: {filename}"
+                "text": f"Fisier: {filename}"
             })
 
             add_pdf_content(content, filename, file_bytes)
 
     if not processed_files_names:
         return jsonify({
-            "error": "Nu s-a găsit niciun document valid în fișierele trimise."
+            "error": "Nu s-a gasit niciun document valid in fisierele trimise."
         }), 400
 
     try:
@@ -337,7 +340,7 @@ Structura JSON obligatorie:
             messages=[
                 {
                     "role": "system",
-                    "content": "Ești un sistem IDP pentru dosare de daună auto. Răspunzi exclusiv în JSON valid."
+                    "content": "Esti un sistem IDP pentru dosare de dauna auto. Raspunzi exclusiv in JSON valid."
                 },
                 {
                     "role": "user",
