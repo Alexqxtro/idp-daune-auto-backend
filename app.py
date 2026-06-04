@@ -29,7 +29,7 @@ def image_to_base64(file_bytes):
     return base64.b64encode(file_bytes).decode("utf-8")
 
 
-def pdf_to_base64_images(pdf_bytes, max_pages=2):
+def pdf_to_base64_images(pdf_bytes, max_pages=1):
     images = []
     try:
         pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -43,17 +43,27 @@ def pdf_to_base64_images(pdf_bytes, max_pages=2):
     return images
 
 
-def pdf_to_text(pdf_bytes, max_pages=5):
+def pdf_to_text(pdf_bytes, max_pages=3, max_chars=2500):
     text_parts = []
+
     try:
         pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+
         for page_index in range(min(len(pdf), max_pages)):
             page_text = pdf[page_index].get_text()
             if page_text.strip():
                 text_parts.append(page_text)
+
+        full_text = "\n".join(text_parts).strip()
+
+        if len(full_text) > max_chars:
+            full_text = full_text[:max_chars] + "\n[TEXT TRUNCHIAT PENTRU LIMITA DE TOKENI]"
+
+        return full_text
+
     except Exception as e:
         print(f"Eroare extragere text PDF: {e}")
-    return "\n".join(text_parts)
+        return ""
 
 
 @app.route("/api/analyze", methods=["POST"])
@@ -160,6 +170,7 @@ Structura JSON obligatorie:
                         if z_ext in ["png", "jpg", "jpeg"]:
                             mime = "image/png" if z_ext == "png" else "image/jpeg"
                             b64 = base64.b64encode(z_bytes).decode("utf-8")
+
                             content.append({
                                 "type": "image_url",
                                 "image_url": {
@@ -168,21 +179,22 @@ Structura JSON obligatorie:
                             })
 
                         elif z_ext == "pdf":
-                            pdf_text = pdf_to_text(z_bytes, max_pages=5)
+                            pdf_text = pdf_to_text(z_bytes, max_pages=3, max_chars=2500)
+
                             if pdf_text:
                                 content.append({
                                     "type": "text",
                                     "text": f"Text extras din PDF {z_filename}:\n{pdf_text}"
                                 })
-
-                            pdf_imgs = pdf_to_base64_images(z_bytes, max_pages=2)
-                            for idx, img_b64 in enumerate(pdf_imgs):
-                                content.append({
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{img_b64}"
-                                    }
-                                })
+                            else:
+                                pdf_imgs = pdf_to_base64_images(z_bytes, max_pages=1)
+                                for idx, img_b64 in enumerate(pdf_imgs):
+                                    content.append({
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/png;base64,{img_b64}"
+                                        }
+                                    })
 
             except Exception as e:
                 return jsonify({
@@ -217,21 +229,22 @@ Structura JSON obligatorie:
                 "text": f"Fișier: {filename}"
             })
 
-            pdf_text = pdf_to_text(file_bytes, max_pages=5)
+            pdf_text = pdf_to_text(file_bytes, max_pages=3, max_chars=2500)
+
             if pdf_text:
                 content.append({
                     "type": "text",
                     "text": f"Text extras din PDF {filename}:\n{pdf_text}"
                 })
-
-            pdf_imgs = pdf_to_base64_images(file_bytes, max_pages=2)
-            for idx, img_b64 in enumerate(pdf_imgs):
-                content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{img_b64}"
-                    }
-                })
+            else:
+                pdf_imgs = pdf_to_base64_images(file_bytes, max_pages=1)
+                for idx, img_b64 in enumerate(pdf_imgs):
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{img_b64}"
+                        }
+                    })
 
     if not processed_files_names:
         return jsonify({
