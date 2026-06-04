@@ -16,16 +16,18 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-# Utilizează cheia din variabila de mediu sau pune cheia direct între ghilimele dacă ai modificat-o înainte
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "pdf", "zip"}
 
+
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
+
 def image_to_base64(file_bytes):
     return base64.b64encode(file_bytes).decode("utf-8")
+
 
 def pdf_to_base64_images(pdf_bytes, max_pages=2):
     images = []
@@ -40,13 +42,27 @@ def pdf_to_base64_images(pdf_bytes, max_pages=2):
         print(f"Eroare conversie PDF: {e}")
     return images
 
+
+def pdf_to_text(pdf_bytes, max_pages=5):
+    text_parts = []
+    try:
+        pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for page_index in range(min(len(pdf), max_pages)):
+            page_text = pdf[page_index].get_text()
+            if page_text.strip():
+                text_parts.append(page_text)
+    except Exception as e:
+        print(f"Eroare extragere text PDF: {e}")
+    return "\n".join(text_parts)
+
+
 @app.route("/api/analyze", methods=["POST"])
 def analyze_documents():
     if "files" not in request.files:
         return jsonify({"error": "Nu ai trimis niciun fișier."}), 400
 
     files = request.files.getlist("files")
-    if not files or files[0].filename == '':
+    if not files or files[0].filename == "":
         return jsonify({"error": "Lista de fișiere este goală."}), 400
 
     content = [
@@ -62,6 +78,19 @@ Trebuie să identifici pentru FIECARE document găsit în listă:
 - dacă există o dată de expirare;
 - dacă documentul este valid sau expirat raportat la data curentă;
 - observații clare pentru utilizator în limba română.
+
+REGULI IMPORTANTE PENTRU POLIȚA CASCO:
+- Pentru polița CASCO, data de expirare trebuie extrasă din câmpuri precum „Perioada asigurată”, „Valabilitate”, „de la ... la ...”.
+- Dacă apare o perioadă de forma „de la 30.09.2025 la 29.09.2028”, atunci data de expirare este 29.09.2028.
+- Nu confunda data emiterii poliței, data contractului, data plății sau data începutului valabilității cu data expirării.
+- Nu marca polița CASCO drept expirată dacă data curentă este înainte de data finală a perioadei asigurate.
+- Dacă textul extras din PDF conține perioada de valabilitate, acordă prioritate textului extras față de interpretarea vizuală a imaginii.
+
+REGULI DE VALIDARE:
+- Dacă documentul are o perioadă de valabilitate cu dată de început și dată de sfârșit, data de expirare este data de sfârșit.
+- Dacă data curentă este înainte sau egală cu data de expirare, documentul este valid.
+- Dacă data curentă este după data de expirare, documentul este invalid/expirat.
+- Dacă nu există dată de expirare clară, pune expiration_date: null și explică în observations.
 
 Returnează strict JSON valid, fără formatare markdown.
 
@@ -88,9 +117,10 @@ Structura JSON obligatorie:
     ]
 
     processed_files_names = []
-    
+
     for file in files:
         filename = file.filename
+
         if not allowed_file(filename):
             continue
 
@@ -103,59 +133,124 @@ Structura JSON obligatorie:
                 with zipfile.ZipFile(BytesIO(file_bytes)) as z:
                     for zip_info in z.infolist():
                         # Ignorăm folderele goale și fișierele de sistem ascunse
-                        if zip_info.is_dir() or zip_info.filename.startswith("__") or "/." in zip_info.filename or zip_info.filename.split("/")[-1].startswith("."):
+                        if (
+                            zip_info.is_dir()
+                            or zip_info.filename.startswith("__")
+                            or "/." in zip_info.filename
+                            or zip_info.filename.split("/")[-1].startswith(".")
+                        ):
                             continue
-                            
+
                         z_filename = zip_info.filename.split("/")[-1]
                         if not z_filename:
                             continue
-                            
+
                         z_ext = z_filename.rsplit(".", 1)[1].lower() if "." in z_filename else ""
                         if z_ext not in ["png", "jpg", "jpeg", "pdf"]:
                             continue
-                            
+
                         z_bytes = z.read(zip_info.filename)
                         processed_files_names.append(z_filename)
-                        
-                        content.append({"type": "text", "text": f"Fișier extras din ZIP: {z_filename}"})
-                        
+
+                        content.append({
+                            "type": "text",
+                            "text": f"Fișier extras din ZIP: {z_filename}"
+                        })
+
                         if z_ext in ["png", "jpg", "jpeg"]:
                             mime = "image/png" if z_ext == "png" else "image/jpeg"
                             b64 = base64.b64encode(z_bytes).decode("utf-8")
-                            content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+                            content.append({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime};base64,{b64}"
+                                }
+                            })
+
                         elif z_ext == "pdf":
+                            pdf_text = pdf_to_text(z_bytes, max_pages=5)
+                            if pdf_text:
+                                content.append({
+                                    "type": "text",
+                                    "text": f"Text extras din PDF {z_filename}:\n{pdf_text}"
+                                })
+
                             pdf_imgs = pdf_to_base64_images(z_bytes, max_pages=2)
                             for idx, img_b64 in enumerate(pdf_imgs):
-                                content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}})
+                                content.append({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{img_b64}"
+                                    }
+                                })
+
             except Exception as e:
-                return jsonify({"success": False, "error": f"Arhiva ZIP nevalidă: {str(e)}"}), 400
+                return jsonify({
+                    "success": False,
+                    "error": f"Arhiva ZIP nevalidă: {str(e)}"
+                }), 400
 
         # Procesare imagini directe externe
         elif extension in ["png", "jpg", "jpeg"]:
             processed_files_names.append(filename)
             mime = "image/png" if extension == "png" else "image/jpeg"
             b64 = image_to_base64(file_bytes)
-            content.append({"type": "text", "text": f"Fișier: {filename}"})
-            content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
-            
+
+            content.append({
+                "type": "text",
+                "text": f"Fișier: {filename}"
+            })
+
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime};base64,{b64}"
+                }
+            })
+
         # Procesare PDF direct extern
         elif extension == "pdf":
             processed_files_names.append(filename)
-            content.append({"type": "text", "text": f"Fișier: {filename}"})
+
+            content.append({
+                "type": "text",
+                "text": f"Fișier: {filename}"
+            })
+
+            pdf_text = pdf_to_text(file_bytes, max_pages=5)
+            if pdf_text:
+                content.append({
+                    "type": "text",
+                    "text": f"Text extras din PDF {filename}:\n{pdf_text}"
+                })
+
             pdf_imgs = pdf_to_base64_images(file_bytes, max_pages=2)
             for idx, img_b64 in enumerate(pdf_imgs):
-                content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}})
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{img_b64}"
+                    }
+                })
 
     if not processed_files_names:
-        return jsonify({"error": "Nu s-a găsit niciun document valid în fișierele trimise."}), 400
+        return jsonify({
+            "error": "Nu s-a găsit niciun document valid în fișierele trimise."
+        }), 400
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": "Ești un sistem IDP pentru dosare de daună auto. Răspunzi exclusiv în JSON valid."},
-                {"role": "user", "content": content}
+                {
+                    "role": "system",
+                    "content": "Ești un sistem IDP pentru dosare de daună auto. Răspunzi exclusiv în JSON valid."
+                },
+                {
+                    "role": "user",
+                    "content": content
+                }
             ],
             temperature=0
         )
@@ -169,7 +264,11 @@ Structura JSON obligatorie:
         })
 
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
